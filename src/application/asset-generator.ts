@@ -2,10 +2,10 @@ import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSyn
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { Communicate } from "edge-tts.js";
-import type { Storyboard, StoryboardScene } from "@/domain/storyboard";
-import type { VideoFormat } from "@/domain/video-project";
-import { planAssets } from "@/domain/assets";
-import { saveAsset, type MediaAsset } from "@/infrastructure/asset-repository";
+import type { Storyboard, StoryboardScene } from "../domain/storyboard.ts";
+import type { VideoFormat } from "../domain/video-project.ts";
+import { planAssets } from "../domain/assets.ts";
+import { saveAsset, type MediaAsset } from "../infrastructure/asset-repository.ts";
 
 const escapeXml = (value: string) =>
   value.replace(/[<>&'"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", '"': "&quot;" }[c]!));
@@ -159,6 +159,77 @@ async function createFreeVoice(dir: string, text: string) {
   }
 }
 
+async function tryFetchPollinationsAiImage(
+  prompt: string,
+  dir: string,
+  sceneId: string,
+  isShort: boolean,
+  order: number
+): Promise<boolean> {
+  const filePath = resolve(dir, `${sceneId}.jpg`);
+  if (existsSync(filePath) && statSync(filePath).size > 5000) {
+    return true;
+  }
+  const width = isShort ? 1080 : 1920;
+  const height = isShort ? 1920 : 1080;
+  const basePrompt = prompt.replace(/[^\w\s]/gi, " ").replace(/\s+/g, " ").trim().slice(0, 90);
+  const cleanPrompt = `${basePrompt}, cinematic, photorealistic, 8k resolution, documentary b-roll, high quality, no text watermark`;
+  const seed = (order * 997 + 101) % 100000;
+  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(cleanPrompt)}?width=${width}&height=${height}&nologo=true&model=flux&seed=${seed}`;
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
+      if (!res.ok) continue;
+      const buffer = Buffer.from(await res.arrayBuffer());
+      if (buffer.length < 5000) continue;
+      writeFileSync(filePath, buffer);
+      return true;
+    } catch {
+      await new Promise((r) => setTimeout(r, 800));
+    }
+  }
+  return false;
+}
+
+async function tryFetchPexelsVideo(
+  query: string,
+  dir: string,
+  sceneId: string,
+  isShort: boolean
+): Promise<boolean> {
+  const apiKey = process.env.PEXELS_API_KEY;
+  if (!apiKey) return false;
+  try {
+    const orientation = isShort ? "portrait" : "landscape";
+    const res = await fetch(
+      `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&per_page=3&orientation=${orientation}`,
+      {
+        headers: { Authorization: apiKey },
+        signal: AbortSignal.timeout(8000),
+      }
+    );
+    if (!res.ok) return false;
+    const data = (await res.json()) as {
+      videos?: Array<{
+        video_files?: Array<{ link: string; width: number; height: number; quality: string }>;
+      }>;
+    };
+    const files = data.videos?.[0]?.video_files ?? [];
+    const videoFile = files.find((f) => f.quality === "hd" || f.width >= 1080) ?? files[0];
+    if (!videoFile?.link) return false;
+
+    const vRes = await fetch(videoFile.link, { signal: AbortSignal.timeout(25000) });
+    if (!vRes.ok) return false;
+    const buffer = Buffer.from(await vRes.arrayBuffer());
+    if (buffer.length < 10000) return false;
+    writeFileSync(resolve(dir, `${sceneId}.mp4`), buffer);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function tryFetchStockImage(query: string, dir: string, filename: string): Promise<boolean> {
   const apiKey = process.env.PEXELS_API_KEY;
   if (!apiKey) return false;
@@ -202,21 +273,41 @@ export async function generateLocalAssets(
       let finalUri = `/generated/${projectId}/${filename}`;
       let finalMime = "image/svg+xml";
       let finalProvenance = `Local branded ${format === "SHORT" ? "9:16 Shorts" : "16:9 Full HD"} SVG visual`;
+      let finalProvider = "local-svg";
 
-      // Optional stock enhancement if configured
-      if (process.env.PEXELS_API_KEY) {
-        const query = scene.visualPrompt || scene.narration.slice(0, 50);
-        const gotStock = await tryFetchStockImage(query, dir, filename);
-        if (gotStock) {
-          finalUri = `/generated/${projectId}/${filename.replace(".svg", ".jpg")}`;
+      const query = scene.visualPrompt || scene.narration.slice(0, 80);
+
+      // Priority 1: Check for Pexels Stock Video (if Pexels API key is configured)
+      const gotVideo = await tryFetchPexelsVideo(query, dir, scene.id, format === "SHORT");
+      if (gotVideo) {
+        finalUri = `/generated/${projectId}/${scene.id}.mp4`;
+        finalMime = "video/mp4";
+        finalProvenance = "Licensed royalty-free HD stock video footage via Pexels API";
+        finalProvider = "pexels-stock-video";
+      } else {
+        // Priority 2: Free AI visual generation via Pollinations AI (Flux / SDXL models)
+        const gotAiImage = await tryFetchPollinationsAiImage(query, dir, scene.id, format === "SHORT", scene.order);
+        if (gotAiImage) {
+          finalUri = `/generated/${projectId}/${scene.id}.jpg`;
           finalMime = "image/jpeg";
-          finalProvenance = "Licensed royalty-free stock imagery via Pexels API";
+          finalProvenance = "Free photorealistic AI visual generated via Pollinations AI (Flux model); no API key required";
+          finalProvider = "pollinations-ai-free";
+        } else {
+          // Priority 3: Pexels Stock Image (if Pexels API key is configured)
+          const gotStockPhoto = await tryFetchStockImage(query, dir, filename);
+          if (gotStockPhoto) {
+            finalUri = `/generated/${projectId}/${filename.replace(".svg", ".jpg")}`;
+            finalMime = "image/jpeg";
+            finalProvenance = "Licensed royalty-free stock photography via Pexels API";
+            finalProvider = "pexels-stock-photo";
+          }
         }
       }
 
       assets.push(
         saveAsset(projectId, {
           ...req,
+          provider: finalProvider,
           assetKind: req.kind,
           status: "READY",
           uri: finalUri,

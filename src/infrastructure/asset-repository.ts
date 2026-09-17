@@ -1,5 +1,5 @@
 import { createHash,randomUUID } from "node:crypto";
-import { db } from "./database";
+import { db } from "./database.ts";
 
 export type MediaAsset={id:string;sceneId:string|null;assetKind:"VISUAL"|"NARRATION"|"THUMBNAIL";status:"PLANNED"|"READY"|"FAILED"|"REJECTED";uri:string;provider:string;prompt:string;license:string;provenance:string;checksum:string;mimeType:string;estimatedCostUsd:number;actualCostUsd:number;createdAt:string};
 export function saveAsset(projectId:string,input:Omit<MediaAsset,"id"|"createdAt"|"checksum">&{content:string}):MediaAsset{

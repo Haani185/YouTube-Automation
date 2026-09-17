@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import type { Storyboard, StoryboardScene } from "@/domain/storyboard";
-import type { VideoFormat } from "@/domain/video-project";
+import type { Storyboard, StoryboardScene } from "../domain/storyboard.ts";
+import type { VideoFormat } from "../domain/video-project.ts";
 import { db } from "../infrastructure/database.ts";
 
 const require = createRequire(import.meta.url);
@@ -50,35 +50,120 @@ function isReadableAudio(path: string) {
   return probe.status === 0 && probe.stdout.trim() === "audio";
 }
 
-function rasterizeScene(scene: StoryboardScene, path: string, isShort: boolean) {
-  const width = isShort ? 540 : 960;
-  const height = isShort ? 960 : 540;
-  const pixels = Buffer.alloc(width * height * 3);
-  const accent = [233, 59, 71];
-  const seed = scene.order * 37;
 
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const offset = (y * width + x) * 3;
-      const t = x / width;
-      const u = y / height;
-      const glow = Math.max(0, 1 - Math.hypot(t - (isShort ? 0.5 : 0.82), u - 0.2) * 2.4);
-      const band = y > height * 0.72 && y < height * 0.78 ? 1 : 0;
+function renderSceneClip(
+  scene: StoryboardScene,
+  root: string,
+  out: string,
+  targetWidth: number,
+  targetHeight: number,
+  isShort: boolean
+): string {
+  const target = resolve(out, `${scene.id}.mp4`);
+  const videoFile = resolve(root, `${scene.id}.mp4`);
+  const imageJpg = resolve(root, `${scene.id}.jpg`);
+  const imagePng = resolve(root, `${scene.id}.png`);
 
-      pixels[offset] = Math.round(11 + 24 * t + accent[0] * glow * 0.16 + accent[0] * band * 0.55);
-      pixels[offset + 1] = Math.round(14 + 10 * t + accent[1] * glow * 0.08 + accent[1] * band * 0.18);
-      pixels[offset + 2] = Math.round(20 + 18 * t + accent[2] * glow * 0.1 + accent[2] * band * 0.2);
+  const duration = Math.max(1, scene.durationSeconds);
+  const totalFrames = Math.round(duration * 30);
 
-      // Accent visual indicator bar
-      const barY = isShort ? 380 + (seed % 60) : 245 + (seed % 45);
-      if (x > 60 && x < 60 + Math.min(width - 120, 180 + scene.narration.length * 3) && y > barY && y < barY + 16) {
-        pixels[offset] = 233;
-        pixels[offset + 1] = 59;
-        pixels[offset + 2] = 71;
-      }
-    }
+  const badgeFile = resolve(out, `${scene.id}-badge.txt`);
+  const overlayFile = resolve(out, `${scene.id}-overlay.txt`);
+  const narrFile = resolve(out, `${scene.id}-narr.txt`);
+
+  writeFileSync(badgeFile, `SCENE ${scene.order} · ${isShort ? "SHORTS" : "KEY TAKEAWAY"}`, "utf8");
+  writeFileSync(overlayFile, scene.overlay || scene.visualType.replaceAll("_", " "), "utf8");
+  writeFileSync(
+    narrFile,
+    scene.narration.length > 95 ? `${scene.narration.slice(0, 92)}...` : scene.narration,
+    "utf8"
+  );
+
+  const safeBadge = badgeFile.replaceAll("\\", "/").replace(":", "\\:");
+  const safeOverlay = overlayFile.replaceAll("\\", "/").replace(":", "\\:");
+  const safeNarr = narrFile.replaceAll("\\", "/").replace(":", "\\:");
+
+  // 1. Real Video Footage (e.g. from Pexels stock video)
+  if (existsSync(videoFile) && statSync(videoFile).size > 1000) {
+    run(ffmpeg, [
+      "-y",
+      "-stream_loop",
+      "-1",
+      "-i",
+      videoFile,
+      "-t",
+      String(duration),
+      "-vf",
+      `scale=${targetWidth}:${targetHeight}:force_original_aspect_ratio=increase,crop=${targetWidth}:${targetHeight},format=rgba,drawbox=x=0:y=${Math.round(targetHeight * 0.72)}:w=${targetWidth}:h=${Math.round(targetHeight * 0.28)}:color=0x000000aa:t=fill,drawtext=textfile='${safeBadge}':fontsize=${isShort ? 28 : 24}:fontcolor=0xff755f:x=${isShort ? 70 : 120}:y=${Math.round(targetHeight * 0.76)},drawtext=textfile='${safeOverlay}':fontsize=${isShort ? 52 : 46}:fontcolor=white:x=${isShort ? 70 : 120}:y=${Math.round(targetHeight * 0.83)},format=yuv420p`,
+      "-r",
+      "30",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "ultrafast",
+      "-an",
+      target,
+    ]);
+    return target;
   }
-  writeFileSync(path, Buffer.concat([Buffer.from(`P6\n${width} ${height}\n255\n`), pixels]));
+
+  // 2. High-resolution AI Image (e.g. from Pollinations AI or stock photo) with Ken Burns motion!
+  if (
+    (existsSync(imageJpg) && statSync(imageJpg).size > 1000) ||
+    (existsSync(imagePng) && statSync(imagePng).size > 1000)
+  ) {
+    const imgPath = existsSync(imageJpg) ? imageJpg : imagePng;
+    const zoomFilter = `zoompan=z='min(zoom+0.0012,1.18)':d=${totalFrames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=${targetWidth}x${targetHeight}:fps=30`;
+    const overlayFilter = `format=rgba,drawbox=x=0:y=${Math.round(targetHeight * 0.72)}:w=${targetWidth}:h=${Math.round(targetHeight * 0.28)}:color=0x000000bb:t=fill,drawtext=textfile='${safeBadge}':fontsize=${isShort ? 28 : 24}:fontcolor=0xff755f:x=${isShort ? 70 : 120}:y=${Math.round(targetHeight * 0.76)},drawtext=textfile='${safeOverlay}':fontsize=${isShort ? 52 : 46}:fontcolor=white:x=${isShort ? 70 : 120}:y=${Math.round(targetHeight * 0.83)},format=yuv420p`;
+
+    run(ffmpeg, [
+      "-y",
+      "-loop",
+      "1",
+      "-i",
+      imgPath,
+      "-t",
+      String(duration),
+      "-vf",
+      `${zoomFilter},${overlayFilter}`,
+      "-r",
+      "30",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "ultrafast",
+      "-an",
+      target,
+    ]);
+    return target;
+  }
+
+  // 3. Fallback: Procedural motion canvas with rich typography and accent styling
+  const cardX = isShort ? 60 : 120;
+  const cardY = isShort ? 280 : 160;
+  const cardW = targetWidth - (isShort ? 120 : 240);
+  const cardH = targetHeight - (isShort ? 560 : 320);
+
+  const filter = `color=c=0x0a0e17:s=${targetWidth}x${targetHeight}:d=${duration},format=rgba,drawbox=x=${cardX}:y=${cardY}:w=${cardW}:h=${cardH}:color=0x141b2dee:t=fill,drawbox=x=${cardX}:y=${cardY}:w=${cardW}:h=10:color=0xff4d57ff:t=fill,drawtext=textfile='${safeBadge}':fontsize=${isShort ? 28 : 26}:fontcolor=0xff755f:x=${cardX + 40}:y=${cardY + 50},drawtext=textfile='${safeOverlay}':fontsize=${isShort ? 52 : 48}:fontcolor=white:x=${cardX + 40}:y=${cardY + 120},drawtext=textfile='${safeNarr}':fontsize=${isShort ? 32 : 28}:fontcolor=0xcbd5e1:x=${cardX + 40}:y=${cardY + 220},format=yuv420p`;
+
+  run(ffmpeg, [
+    "-y",
+    "-f",
+    "lavfi",
+    "-i",
+    filter,
+    "-t",
+    String(duration),
+    "-r",
+    "30",
+    "-c:v",
+    "libx264",
+    "-preset",
+    "ultrafast",
+    "-an",
+    target,
+  ]);
+  return target;
 }
 
 export function renderDemoVideo(
@@ -107,29 +192,7 @@ export function renderDemoVideo(
 
   // Generate individual MP4 clips for each scene
   const clips = storyboard.scenes.map((s) => {
-    const raster = resolve(out, `${s.id}.ppm`);
-    const target = resolve(out, `${s.id}.mp4`);
-    rasterizeScene(s, raster, isShort);
-    run(ffmpeg, [
-      "-y",
-      "-loop",
-      "1",
-      "-i",
-      raster,
-      "-t",
-      String(s.durationSeconds),
-      "-vf",
-      `scale=${targetWidth}:${targetHeight},format=yuv420p`,
-      "-r",
-      "30",
-      "-c:v",
-      "libx264",
-      "-preset",
-      "ultrafast",
-      "-an",
-      target,
-    ]);
-    return target;
+    return renderSceneClip(s, root, out, targetWidth, targetHeight, isShort);
   });
 
   const concat = clips.map((p) => `file '${p.replaceAll("'", "'\\''")}'`).join("\n");
