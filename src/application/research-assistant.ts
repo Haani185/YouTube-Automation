@@ -26,7 +26,7 @@ export async function findResearchSource(topic:TopicCandidate):Promise<Omit<Rese
     const pages=Object.values(data.query?.pages??{}).filter(page=>page.extract&&page.fullurl);
     const page=pages.find(item=>!item.extract!.toLowerCase().includes("may refer to"))??pages[0];
     if(!page?.extract||!page.fullurl)return offlineResearchSource(topic);
-    return{title:page.title,url:page.fullurl,publisher:"Wikipedia",publishedAt:null,trustLevel:"MEDIUM",notes:page.extract.slice(0,1000)};
+    return{title:page.title,url:page.fullurl,publisher:"Wikipedia",publishedAt:null,trustLevel:"MEDIUM",notes:page.extract.slice(0,5000)};
   }catch{return offlineResearchSource(topic)}
 }
 

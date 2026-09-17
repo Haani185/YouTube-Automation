@@ -116,14 +116,52 @@ export async function approveTopicAction(projectId: string, topicId: string) {
   revalidatePath("/");
 }
 
-export async function addResearchSourceAction(projectId:string,formData:FormData){
-  const input=sourceInputSchema.parse({title:formData.get("title"),url:formData.get("url"),publisher:formData.get("publisher"),publishedAt:formData.get("publishedAt")||null,trustLevel:formData.get("trustLevel"),notes:formData.get("notes")});
-  addSource(projectId,{...input,publishedAt:input.publishedAt??null}); revalidatePath(`/projects/${projectId}`);
+export async function addResearchSourceAction(projectId: string, formData: FormData) {
+  const rawNotes = String(formData.get("notes") ?? "").trim();
+  const notes = rawNotes.length > 10000 ? rawNotes.slice(0, 10000) : rawNotes;
+  const parsed = sourceInputSchema.safeParse({
+    title: formData.get("title"),
+    url: formData.get("url"),
+    publisher: formData.get("publisher"),
+    publishedAt: formData.get("publishedAt") || null,
+    trustLevel: formData.get("trustLevel"),
+    notes,
+  });
+
+  if (!parsed.success) {
+    const errorMsg = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join(", ");
+    throw new Error(`Invalid source data: ${errorMsg}`);
+  }
+
+  try {
+    addSource(projectId, { ...parsed.data, publishedAt: parsed.data.publishedAt ?? null });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("UNIQUE constraint failed")) {
+      throw new Error("A source with this URL has already been added to this project.");
+    }
+    throw err;
+  }
+  revalidatePath(`/projects/${projectId}`);
 }
 
-export async function addClaimAction(projectId:string,formData:FormData){
-  const input=claimInputSchema.parse({claimText:formData.get("claimText"),sourceId:formData.get("sourceId")||null,supportStatus:formData.get("supportStatus"),riskLevel:formData.get("riskLevel"),evidence:formData.get("evidence"),asOfDate:formData.get("asOfDate")||null});
-  addClaim(projectId,{...input,sourceId:input.sourceId??null,asOfDate:input.asOfDate??null}); revalidatePath(`/projects/${projectId}`);
+export async function addClaimAction(projectId: string, formData: FormData) {
+  const parsed = claimInputSchema.safeParse({
+    claimText: formData.get("claimText"),
+    sourceId: formData.get("sourceId") || null,
+    supportStatus: formData.get("supportStatus"),
+    riskLevel: formData.get("riskLevel"),
+    evidence: formData.get("evidence"),
+    asOfDate: formData.get("asOfDate") || null,
+  });
+
+  if (!parsed.success) {
+    const errorMsg = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join(", ");
+    throw new Error(`Invalid claim data: ${errorMsg}`);
+  }
+
+  addClaim(projectId, { ...parsed.data, sourceId: parsed.data.sourceId ?? null, asOfDate: parsed.data.asOfDate ?? null });
+  revalidatePath(`/projects/${projectId}`);
 }
 
 export async function generateResearchSourceAction(projectId:string){const project=getProject(projectId);if(!project||project.state!=="RESEARCHING")throw new Error("Sources can only be generated during research");const topic=listTopics(projectId).find(item=>item.status==="APPROVED");if(!topic)throw new Error("Approve a topic first");const draft=await findResearchSource(topic);if(!listSources(projectId).some(source=>source.url===draft.url))addSource(projectId,draft);revalidatePath(`/projects/${projectId}`);}
