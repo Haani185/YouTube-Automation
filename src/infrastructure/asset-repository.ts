@@ -1,0 +1,10 @@
+import { createHash,randomUUID } from "node:crypto";
+import { db } from "./database";
+
+export type MediaAsset={id:string;sceneId:string|null;assetKind:"VISUAL"|"NARRATION"|"THUMBNAIL";status:"PLANNED"|"READY"|"FAILED"|"REJECTED";uri:string;provider:string;prompt:string;license:string;provenance:string;checksum:string;mimeType:string;estimatedCostUsd:number;actualCostUsd:number;createdAt:string};
+export function saveAsset(projectId:string,input:Omit<MediaAsset,"id"|"createdAt"|"checksum">&{content:string}):MediaAsset{
+  const asset={id:randomUUID(),createdAt:new Date().toISOString(),checksum:createHash("sha256").update(input.content).digest("hex"),...input};
+  db.prepare(`INSERT INTO media_assets VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id,scene_id,asset_kind) DO UPDATE SET status=excluded.status,uri=excluded.uri,provider=excluded.provider,prompt=excluded.prompt,license=excluded.license,provenance=excluded.provenance,checksum=excluded.checksum,mime_type=excluded.mime_type,estimated_cost_usd=excluded.estimated_cost_usd,actual_cost_usd=excluded.actual_cost_usd,created_at=excluded.created_at`).run(asset.id,projectId,asset.sceneId,asset.assetKind,asset.status,asset.uri,asset.provider,asset.prompt,asset.license,asset.provenance,asset.checksum,asset.mimeType,asset.estimatedCostUsd,asset.actualCostUsd,asset.createdAt);
+  return asset;
+}
+export function listMediaAssets(projectId:string):MediaAsset[]{return(db.prepare("SELECT * FROM media_assets WHERE project_id=? ORDER BY scene_id,asset_kind").all(projectId)as Record<string,unknown>[]).map(r=>({id:r.id as string,sceneId:r.scene_id as string|null,assetKind:r.asset_kind as MediaAsset["assetKind"],status:r.status as MediaAsset["status"],uri:r.uri as string,provider:r.provider as string,prompt:r.prompt as string,license:r.license as string,provenance:r.provenance as string,checksum:r.checksum as string,mimeType:r.mime_type as string,estimatedCostUsd:r.estimated_cost_usd as number,actualCostUsd:r.actual_cost_usd as number,createdAt:r.created_at as string}));}

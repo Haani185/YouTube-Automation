@@ -1,0 +1,4 @@
+import {cookies} from "next/headers";
+import {exchangeCode} from "@/infrastructure/youtube-auth";
+export const runtime="nodejs";
+export async function GET(request:Request){const url=new URL(request.url),code=url.searchParams.get("code"),state=url.searchParams.get("state"),oauthError=url.searchParams.get("error"),jar=await cookies(),expected=jar.get("youtube_oauth_state")?.value;jar.delete("youtube_oauth_state");if(oauthError)return Response.redirect(new URL(`/settings?youtube=error&reason=${encodeURIComponent(oauthError)}`,request.url));if(!code||!state||!expected||state!==expected)return Response.redirect(new URL("/settings?youtube=error&reason=invalid_state",request.url));try{await exchangeCode(code);return Response.redirect(new URL("/settings?youtube=connected",request.url));}catch(error){return Response.redirect(new URL(`/settings?youtube=error&reason=${encodeURIComponent(error instanceof Error?error.message:"connection_failed")}`,request.url));}}
